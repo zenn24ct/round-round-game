@@ -1,0 +1,253 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>カラースイッチ！！</title>
+<style>
+  html,body{height:100%;margin:0;background:#07121a;color:#fff;font-family:system-ui,-apple-system,Segoe UI,Roboto,"Hiragino Kaku Gothic ProN";}
+  .wrap{display:flex;flex-direction:column;align-items:center;gap:10px;padding:18px}
+  canvas{background:linear-gradient(#07101a,#06101a);border-radius:10px;box-shadow:0 8px 30px rgba(0,0,0,.6);touch-action:none;}
+  .info{width:100%;max-width:720px;display:flex;justify-content:space-between;align-items:center}
+  .btn{background:#ffffff10;border:1px solid #ffffff20;padding:6px 10px;border-radius:8px;color:#fff;font-size:14px}
+  .small{font-size:13px;opacity:.9}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="info">
+    <div style="display:flex;gap:8px;align-items:center">
+      <button class="btn" id="restart">Restart</button>
+      <div class="small">Click / Tap / Space to jump</div>
+    </div>
+    <div id="score" style="font-weight:700">Score: 0</div>
+  </div>
+  <canvas id="c" width="480" height="720"></canvas>
+</div>
+
+<script>
+/* Color Switch - 調整版
+   ・リング間隔（OBSTACLE_GAP）を拡大
+   ・回転スピード倍率（ROT_SPEED_MULT）を追加して回転を速める
+*/
+
+const canvas = document.getElementById('c');
+const ctx = canvas.getContext('2d');
+const W = canvas.width, H = canvas.height;
+
+const COLORS = ['#ff3b30','#ff9500','#ffd60a','#34c759'];
+let scoreEl = document.getElementById('score');
+
+// --- 調整しやすい定数 ---
+const OBSTACLE_GAP = 500;    // リングとリングの縦間隔（大きくすると距離が伸びる）
+const ROT_SPEED_MULT = 6.0;  // 回転の倍率（大きくすると回転が速くなる）
+// ---------------------------
+
+let state = {};
+
+function resetGame(){
+  state = {
+    ball: { x: W/2, y: H - 140, r: 12, color: COLORS[Math.floor(Math.random()*COLORS.length)], vy: 0 },
+    gravity: 0.35,
+    jump: -8,
+    speed: 2.0,
+    obstacles: [],
+    changers: [],
+    frames: 0,
+    running: true,
+    gameOver: false,
+    score: 0,
+    invincible: 60
+  };
+  // 障害を下から順に確実に配置（開始時に重なりづらくする）
+  const startY = H + 120;
+  state.obstacles = [];
+  for(let i=0;i<5;i++){
+    spawnObstacle(startY + i * OBSTACLE_GAP);
+  }
+  state.changers = [];
+  spawnChanger(startY + Math.floor(OBSTACLE_GAP/2));
+  updateScore();
+}
+
+function spawnObstacle(y){
+  state.obstacles.push({
+    x: W/2,
+    y: y,
+    radius: 120,
+    thickness: 14,
+    rotation: Math.random()*Math.PI*2,
+    // これ消したい↓
+    // 基本の回転速度（小さなランダム値） — 最終回転は update 内で ROT_SPEED_MULT を掛けます
+    rotSpeed: (Math.random()*1.2 - 0.6) * 0.02,
+    segments: 4,
+    _passed: false
+  });
+}
+
+function spawnChanger(y){
+  state.changers.push({ x: W/2, y: y, r: 14, active: true });
+}
+
+// 入力
+function jump(){
+  if(state.gameOver){ resetGame(); return; }
+  state.ball.vy = state.jump;
+}
+window.addEventListener('keydown', e => { if(e.code==='Space') jump(); });
+window.addEventListener('mousedown', jump);
+window.addEventListener('touchstart', e => { e.preventDefault(); jump(); }, {passive:false});
+document.getElementById('restart').addEventListener('click', resetGame);
+
+// 描画簡易
+function drawCircle(x,y,r,fill){
+  ctx.beginPath(); ctx.arc(x,y,r,0,Math.PI*2); ctx.closePath();
+  ctx.fillStyle = fill; ctx.fill();
+}
+function drawRing(x,y,r,thickness,startAngle,endAngle,strokeStyle){
+  ctx.beginPath(); ctx.arc(x,y,r,startAngle,endAngle); ctx.lineWidth = thickness; ctx.strokeStyle = strokeStyle; ctx.lineCap='butt'; ctx.stroke();
+}
+
+// 衝突判定（球とリング）
+// 判定を少し甘めにして、距離の余裕を増やす
+function checkCollisionWithRing(ball, ring){
+  const dx = ball.x - ring.x;
+  const dy = ball.y - ring.y;
+  const dist = Math.sqrt(dx*dx + dy*dy);
+  const inner = ring.radius - ring.thickness/2 - 6;
+  const outer = ring.radius + ring.thickness/2 + 6;
+  if(dist < inner || dist > outer) return false;
+
+  let ang = Math.atan2(dy, dx) - ring.rotation;
+  if(ang < 0) ang += Math.PI*2;
+  const segSize = (Math.PI*2) / ring.segments;
+  const segIndex = Math.floor(ang / segSize);
+  const segColor = COLORS[segIndex % COLORS.length];
+  const same = segColor === ball.color;
+  return !same;
+}
+
+// チェンジャー判定
+function checkChanger(ball, changer){
+  const dx = ball.x - changer.x, dy = ball.y - changer.y;
+  return Math.sqrt(dx*dx + dy*dy) < (ball.r + changer.r + 2);
+}
+
+function update(){
+  if(!state.running) return;
+  state.frames++;
+  if(state.invincible>0) state.invincible--;
+
+  // 物理
+  state.ball.vy += state.gravity;
+  state.ball.y += state.ball.vy;
+
+  // カメラ的に障害を上へ移動
+  const move = state.speed;
+  for(let r of state.obstacles) r.y -= move;
+  for(let c of state.changers) c.y -= move;
+
+  // リサイクル（上に行ったら下に追加）
+  state.obstacles = state.obstacles.filter(r => r.y + r.radius > -60);
+  while(state.obstacles.length < 5){
+    const lastY = state.obstacles.length ? state.obstacles[state.obstacles.length-1].y : H;
+    spawnObstacle(lastY + OBSTACLE_GAP);
+  }
+  state.changers = state.changers.filter(c => c.y + c.r > -60);
+
+  // ランダムでチェンジャーを出す（リング間隔に合わせて出現）
+  if(state.frames % Math.max(160, Math.floor(OBSTACLE_GAP * 0.75)) === 0) {
+    const lastY = state.changers.length ? state.changers[state.changers.length-1].y : H;
+    spawnChanger(lastY + OBSTACLE_GAP + 20);
+  }
+
+  // 障害の回転と衝突判定（ただし無敵時間中は衝突を無視）
+  for(let r of state.obstacles){
+    // rotSpeed に倍率をかけて回転を速める
+    r.rotation += r.rotSpeed * ROT_SPEED_MULT;
+    if(!r._passed && (state.ball.y < r.y - r.radius)){
+      r._passed = true;
+      state.score++;
+      updateScore();
+      if(state.score % 6 === 0) state.speed += 0.12;
+    }
+    if(state.invincible <= 0 && checkCollisionWithRing(state.ball, r)){
+      state.running = false; state.gameOver = true;
+    }
+  }
+
+  // チェンジャー当たり判定
+  for(let c of state.changers){
+    if(c.active && checkChanger(state.ball, c)){
+      let newColor = state.ball.color;
+      while(newColor === state.ball.color) newColor = COLORS[Math.floor(Math.random()*COLORS.length)];
+      state.ball.color = newColor;
+      c.active = false;
+      c.y = -999;
+      state.ball.vy = state.jump * 0.6;
+    }
+  }
+
+  // 地面外へ落ちたらゲームオーバー
+  if(state.ball.y - state.ball.r > H){
+    state.running = false; state.gameOver = true;
+  }
+  if(state.ball.y < state.ball.r) state.ball.y = state.ball.r, state.ball.vy = 0;
+}
+
+function render(){
+  ctx.clearRect(0,0,W,H);
+
+  // 障害
+  for(let r of state.obstacles){
+    const seg = r.segments;
+    const segSize = (Math.PI*2)/seg;
+    for(let i=0;i<seg;i++){
+      const sa = r.rotation + segSize*i;
+      const ea = sa + segSize;
+      drawRing(r.x, r.y, r.radius, r.thickness, sa, ea, COLORS[i % COLORS.length]);
+    }
+    drawCircle(r.x, r.y, 6, '#0b1220');
+  }
+
+  // チェンジャー
+  for(let c of state.changers){
+    if(!c.active) continue;
+    ctx.save();
+    ctx.translate(c.x, c.y);
+    ctx.rotate((state.frames%360)/360 * Math.PI*2);
+    drawCircle(0,0,c.r+3, '#fff');
+    drawCircle(0,0,c.r, state.ball.color);
+    ctx.restore();
+  }
+
+  // ボール
+  drawCircle(state.ball.x, state.ball.y, state.ball.r, state.ball.color);
+  if(state.invincible > 0 && (Math.floor(state.frames/8) % 2 === 0)){
+    ctx.beginPath();
+    ctx.arc(state.ball.x, state.ball.y, state.ball.r+6, 0, Math.PI*2);
+    ctx.strokeStyle = 'rgba(255,255,255,0.15)'; ctx.lineWidth = 2; ctx.stroke();
+  }
+
+  // HUD / Game Over 表示
+  if(state.gameOver){
+    ctx.fillStyle = 'rgba(0,0,0,0.6)';
+    ctx.fillRect(0, H/2 - 60, W, 120);
+    ctx.fillStyle = '#fff';
+    ctx.font = '28px system-ui, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('Game Over', W/2, H/2 - 6);
+    ctx.font = '16px system-ui, sans-serif';
+    ctx.fillText('Click / Tap / Space to restart', W/2, H/2 + 22);
+  }
+}
+
+function updateScore(){ scoreEl.textContent = 'Score: ' + state.score; }
+
+function loop(){ update(); render(); requestAnimationFrame(loop); }
+
+resetGame();
+loop();
+</script>
+</body>
+</html>
